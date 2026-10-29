@@ -1,0 +1,77 @@
+# Publica uma versão do Certific Hub.
+#
+# Como funciona: o script `npm run publicar` (no projeto do Certific Hub) envia para o ramo
+# "envio" deste repositório uma pasta com:
+#   - CertificHub-<versão>-setup-x64.exe   (instalador)
+#   - novidades.md                          (novidades da versão, tiradas do CHANGELOG)
+#   - publicar.json                         ({ "versao": "...", "canais": ["piloto", ...] })
+#   - <canal>.yml                           (um por canal: diz aos programas qual é a versão nova)
+# Esta automação cria a release v<versão> com o instalador e atualiza os arquivos da release "canais".
+# Depois limpa o ramo "envio" para o repositório não crescer.
+
+name: Publicar versão
+
+on:
+  push:
+    branches: [envio]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publicar
+  cancel-in-progress: false
+
+jobs:
+  publicar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: envio
+
+      - name: Ler dados da versão
+        id: dados
+        run: |
+          VERSAO=$(jq -r .versao envio/publicar.json)
+          echo "versao=$VERSAO" >> "$GITHUB_OUTPUT"
+          echo "canais=$(jq -r '.canais | join(" ")' envio/publicar.json)" >> "$GITHUB_OUTPUT"
+          echo "Versão: $VERSAO"
+          ls -la envio
+
+      - name: Criar a release da versão com o instalador
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSAO: ${{ steps.dados.outputs.versao }}
+        run: |
+          TAG="v$VERSAO"
+          EXE="envio/CertificHub-$VERSAO-setup-x64.exe"
+          test -f "$EXE"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG já existe: substituindo o instalador."
+            gh release upload "$TAG" "$EXE" --clobber
+            gh release edit "$TAG" --notes-file envio/novidades.md
+          else
+            PRE=""
+            case "$VERSAO" in *-*) PRE="--prerelease" ;; esac
+            gh release create "$TAG" "$EXE" --target main --title "Certific Hub $VERSAO" --notes-file envio/novidades.md $PRE --latest=false
+          fi
+
+      - name: Atualizar os canais (os programas instalados leem estes arquivos)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANAIS: ${{ steps.dados.outputs.canais }}
+        run: |
+          if ! gh release view canais >/dev/null 2>&1; then
+            gh release create canais --target main --title "Canais de atualização (não apagar)" \
+              --notes "Arquivos lidos pelo Certific Hub para saber qual é a versão mais nova de cada canal. Não apague esta release." --latest=false
+          fi
+          for C in $CANAIS; do
+            gh release upload canais "envio/$C.yml" --clobber
+            echo "Canal $C atualizado."
+          done
+
+      - name: Limpar o ramo de envio
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: git push origin --delete envio || true
